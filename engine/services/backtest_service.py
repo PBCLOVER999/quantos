@@ -4,22 +4,29 @@ import pandas as pd
 import numpy as np
 
 # =================================================
-# CONFIG — STRUCTURAL REALISM
+# CONFIG — STRUCTURAL REALISM + RISK CONTROL
 # =================================================
 
 BACKTEST_START_DATE = pd.Timestamp("2005-01-01")
 
 # Transaction cost model
-SLIPPAGE_BPS = 2.0        # slippage per unit turnover
-COMMISSION_BPS = 0.0     # optional, keep zero for now
+SLIPPAGE_BPS = 2.0
+COMMISSION_BPS = 0.0
 TOTAL_COST_BPS = SLIPPAGE_BPS + COMMISSION_BPS
+
+# Volatility targeting
+TARGET_ANNUAL_VOL = 0.12      # 12% target vol
+VOL_LOOKBACK = 63             # ~3 months
+MAX_LEVERAGE = 2.0            # hard cap
 
 
 def run_backtest_service(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Multi-asset backtest with turnover-based transaction costs.
+    Multi-asset backtest with:
+      - turnover-based transaction costs
+      - portfolio-level volatility targeting (NO lookahead)
 
-    REQUIRED INPUT COLUMNS:
+    REQUIRED INPUT:
       - date
       - ticker
       - price
@@ -30,11 +37,13 @@ def run_backtest_service(df: pd.DataFrame) -> pd.DataFrame:
       - daily_ret
       - cumret
 
-    ALSO SAVES:
-      - turnover
-      - cost
+    ALSO SAVES DIAGNOSTICS:
       - gross_ret
       - net_ret
+      - turnover
+      - cost
+      - leverage
+      - rolling_vol
     """
 
     print("[BacktestService] Running backtest engine...")
@@ -75,7 +84,7 @@ def run_backtest_service(df: pd.DataFrame) -> pd.DataFrame:
     df["cost"] = df["turnover"] * cost_rate
 
     # -------------------------------------------------
-    # 4) PnL
+    # 4) Asset-level PnL
     # -------------------------------------------------
     df["pnl_gross"] = df["weight"] * df["ret"]
     df["pnl_net"] = df["pnl_gross"] - df["cost"]
@@ -92,19 +101,42 @@ def run_backtest_service(df: pd.DataFrame) -> pd.DataFrame:
               cost=("cost", "sum"),
           )
           .sort_values("date")
+          .reset_index(drop=True)
     )
 
-    daily["daily_ret"] = daily["net_ret"]
+    daily["raw_daily_ret"] = daily["net_ret"]
+
+    # -------------------------------------------------
+    # 6) Volatility targeting (NO LOOKAHEAD)
+    # -------------------------------------------------
+    daily["rolling_vol"] = (
+        daily["raw_daily_ret"]
+        .rolling(VOL_LOOKBACK)
+        .std()
+        * np.sqrt(252)
+    )
+
+    daily["leverage"] = TARGET_ANNUAL_VOL / daily["rolling_vol"]
+    daily["leverage"] = daily["leverage"].clip(upper=MAX_LEVERAGE)
+    daily["leverage"] = daily["leverage"].fillna(0.0)
+
+    daily["daily_ret"] = daily["raw_daily_ret"] * daily["leverage"]
+
+    # -------------------------------------------------
+    # 7) Equity curve
+    # -------------------------------------------------
     daily["cumret"] = (1.0 + daily["daily_ret"]).cumprod()
 
     # -------------------------------------------------
-    # 6) Save results
+    # 8) Save results
     # -------------------------------------------------
     daily.to_csv("results/backtest_results.csv", index=False)
 
     print(
         f"[BacktestService] Results saved to results/backtest_results.csv "
-        f"(start={BACKTEST_START_DATE.date()}, cost_bps={TOTAL_COST_BPS})"
+        f"(start={BACKTEST_START_DATE.date()}, "
+        f"target_vol={TARGET_ANNUAL_VOL:.0%}, "
+        f"cost_bps={TOTAL_COST_BPS})"
     )
 
     return daily
