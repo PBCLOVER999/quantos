@@ -1,17 +1,9 @@
-# Python
+venv/
 __pycache__/
 *.pyc
-*.pyo
-
-# Virtual environments
-venv/
-.env/
-.envrc
-
-# OS
-.DS_Store
-
-# Results / outputs
+.env
 results/
+data/
 *.csv
-*.png
+*.parquet
+*.log
