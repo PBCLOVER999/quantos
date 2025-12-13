@@ -13,54 +13,51 @@ def main():
 
     # ============================================================
     # 1. FACTOR ENGINE
-    # Input : raw multi-asset price data
-    # Output: factors per ticker / date
     # ============================================================
     df_factors = run_factor_engine()
 
     # ============================================================
     # 2. SIGNAL ENGINE
-    # Input : factor dataframe
-    # Output: signals (raw_signal, regime, etc.)
     # ============================================================
     df_signals = run_signal_engine(df_factors)
 
     # ============================================================
     # 3. PORTFOLIO ENGINE
-    # Input : signals dataframe
-    # Output: risk-managed portfolio weights
     # ============================================================
     df_portfolio = build_risk_managed_mom_portfolio(df_signals)
 
     # ============================================================
-    # 4. EXECUTION ENGINE  ✅ NEW (NO LOOKAHEAD)
-    # Input : portfolio weights
-    # Output: executed weights with lag
+    # 4. EXECUTION ENGINE (NO LOOKAHEAD)
     # ============================================================
     df_exec = apply_execution_lag(df_portfolio, lag_days=2)
 
     # ============================================================
     # 5. BACKTEST ENGINE
-    # Input : executed portfolio
-    # Output: equity curve, returns, PnL
     # ============================================================
     df_results = run_backtest_service(df_exec)
 
     # ============================================================
-    # 6. WALK-FORWARD (OOS) EVALUATION ✅
+    # 6. WALK-FORWARD (DISABLED FOR NOW)
+    # ------------------------------------------------------------
+    # Walk-forward is intentionally disabled until:
+    #   - Core strategy validated
+    #   - Hyperparameters stabilized
+    #
+    # Uncomment ONLY when ready.
     # ============================================================
-    run_walkforward(
-        df_results,
-        start_date="2005-01-01",
-        train_years=5,
-        test_years=1,
-        out_csv="results/walkforward_summary.csv",
-    )
+    #
+    # from engine.services.walkforward_service import run_walkforward
+    #
+    # run_walkforward(
+    #     df_results,
+    #     start_date="2005-01-01",
+    #     train_years=5,
+    #     test_years=1,
+    #     out_csv="results/walkforward_summary.csv",
+    # )
 
     # ============================================================
-    # 6. PERFORMANCE ENGINE
-    # Input : backtest results
-    # Output: performance metrics
+    # 7. PERFORMANCE ENGINE
     # ============================================================
     perf = compute_performance(df_results)
 
