@@ -9,10 +9,10 @@ import numpy as np
 
 MAX_WEIGHT_PER_ASSET = 0.25
 
-REGIME_GROSS_ON  = 1.00   # normal exposure
-REGIME_GROSS_OFF = 0.25   # risk-off throttle (NOT zero)
+REGIME_GROSS_ON  = 1.00   # full risk-on exposure
+REGIME_GROSS_OFF = 0.25   # throttled risk-off exposure
 
-MAX_GROSS = 1.00          # hard portfolio gross cap
+MAX_GROSS = 1.00          # absolute portfolio gross cap
 TURNOVER_CAP_PER_DAY = 0.05
 
 
@@ -25,27 +25,22 @@ def _risk_model_for_day(day: pd.DataFrame) -> pd.DataFrame:
     Regime-aware cross-sectional momentum portfolio.
 
     - Risk-ON  → full momentum exposure
-    - Risk-OFF → throttled exposure (same alpha, smaller size)
+    - Risk-OFF → same alpha, reduced gross
     """
 
     day = day.copy()
     day["weight_target"] = 0.0
 
     # ------------------------------------------------
-    # 1) Regime throttle
+    # 1) Regime → gross target
     # ------------------------------------------------
-    if "regime" in day.columns and len(day) > 0:
-        reg = float(day["regime"].iloc[0])
-    else:
-        reg = 1.0
-
+    reg = float(day["regime"].iloc[0]) if "regime" in day.columns else 1.0
     gross_target = REGIME_GROSS_ON if reg > 0 else REGIME_GROSS_OFF
 
     # ------------------------------------------------
-    # 2) Extract signals
+    # 2) Signals
     # ------------------------------------------------
     sig = day["raw_signal"].astype(float)
-
     longs  = sig > 0
     shorts = sig < 0
 
@@ -57,25 +52,31 @@ def _risk_model_for_day(day: pd.DataFrame) -> pd.DataFrame:
         return day
 
     # ------------------------------------------------
-    # 3) Equal-weight legs (scaled by gross target)
+    # 3) Equal-weight raw allocation (NO scaling yet)
     # ------------------------------------------------
     if n_long > 0:
-        w_long = min(gross_target / max(n_long, 1), MAX_WEIGHT_PER_ASSET)
-        day.loc[longs, "weight_target"] = w_long
+        day.loc[longs, "weight_target"] = 1.0 / n_long
 
     if n_short > 0:
-        w_short = -min(gross_target / max(n_short, 1), MAX_WEIGHT_PER_ASSET)
-        day.loc[shorts, "weight_target"] = w_short
+        day.loc[shorts, "weight_target"] = -1.0 / n_short
 
     # ------------------------------------------------
-    # 4) Normalize to exact gross_target
+    # 4) Normalize to gross_target
     # ------------------------------------------------
     gross = day["weight_target"].abs().sum()
     if gross > 0:
         day["weight_target"] *= (gross_target / gross)
 
     # ------------------------------------------------
-    # 5) Hard gross cap (kills leverage spikes)
+    # 5) Per-asset hard cap
+    # ------------------------------------------------
+    day["weight_target"] = day["weight_target"].clip(
+        lower=-MAX_WEIGHT_PER_ASSET,
+        upper=MAX_WEIGHT_PER_ASSET
+    )
+
+    # ------------------------------------------------
+    # 6) FINAL gross clamp (safety)
     # ------------------------------------------------
     gross_now = day["weight_target"].abs().sum()
     if gross_now > MAX_GROSS and gross_now > 0:
@@ -87,7 +88,8 @@ def _risk_model_for_day(day: pd.DataFrame) -> pd.DataFrame:
 
 def _apply_turnover_cap(df: pd.DataFrame, max_turnover: float) -> pd.DataFrame:
     """
-    Limit per-asset daily turnover AFTER portfolio construction.
+    Limit per-asset daily turnover.
+    ALSO enforces final gross cap post-adjustment.
     """
 
     df = df.sort_values(["date", "ticker"]).copy()
@@ -112,6 +114,11 @@ def _apply_turnover_cap(df: pd.DataFrame, max_turnover: float) -> pd.DataFrame:
             prev_w[t] = adj
             weights.append(adj)
 
+        # ---------- FINAL GROSS CLIP (CRITICAL) ----------
+        gross = sum(abs(w) for w in weights)
+        if gross > MAX_GROSS and gross > 0:
+            weights = [w / gross * MAX_GROSS for w in weights]
+
         day["weight"] = weights
         out.append(day)
 
@@ -120,7 +127,7 @@ def _apply_turnover_cap(df: pd.DataFrame, max_turnover: float) -> pd.DataFrame:
 
 def build_risk_managed_mom_portfolio(df_signals: pd.DataFrame) -> pd.DataFrame:
     """
-    Final portfolio construction pipeline.
+    Full portfolio construction pipeline.
     """
 
     print("[PortfolioEngine] Building RISK-MANAGED cross-sectional momentum portfolio...")
@@ -141,6 +148,4 @@ def build_risk_managed_mom_portfolio(df_signals: pd.DataFrame) -> pd.DataFrame:
     print(port.head())
 
     df.to_csv("results/debug_portfolio.csv", index=False)
-
     return port
-
