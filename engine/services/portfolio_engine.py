@@ -22,17 +22,14 @@ TURNOVER_CAP_PER_DAY = 0.05
 
 def _risk_model_for_day(day: pd.DataFrame) -> pd.DataFrame:
     """
-    Regime-aware cross-sectional momentum portfolio.
-
-    - Risk-ON  → full momentum exposure
-    - Risk-OFF → same alpha, reduced gross
+    Regime-aware, volatility-scaled cross-sectional momentum portfolio.
     """
 
     day = day.copy()
     day["weight_target"] = 0.0
 
     # ------------------------------------------------
-    # 1) Regime → gross target
+    # 1) Regime throttle
     # ------------------------------------------------
     reg = float(day["regime"].iloc[0]) if "regime" in day.columns else 1.0
     gross_target = REGIME_GROSS_ON if reg > 0 else REGIME_GROSS_OFF
@@ -44,47 +41,55 @@ def _risk_model_for_day(day: pd.DataFrame) -> pd.DataFrame:
     longs  = sig > 0
     shorts = sig < 0
 
-    n_long  = longs.sum()
-    n_short = shorts.sum()
-
-    if n_long == 0 and n_short == 0:
+    if longs.sum() == 0 and shorts.sum() == 0:
         day["weight"] = 0.0
         return day
 
     # ------------------------------------------------
-    # 3) Equal-weight raw allocation (NO scaling yet)
+    # 3) Volatility scaling
     # ------------------------------------------------
-    if n_long > 0:
-        day.loc[longs, "weight_target"] = 1.0 / n_long
+    # Use vol_20, fallback if missing
+    vol = day["vol_20"].replace(0, np.nan)
+    inv_vol = 1.0 / vol
+    inv_vol = inv_vol.fillna(0.0)
 
-    if n_short > 0:
-        day.loc[shorts, "weight_target"] = -1.0 / n_short
+    # Apply direction
+    raw_weights = inv_vol * sig.abs()
+
+    # Normalize separately for long / short legs
+    long_sum  = raw_weights[longs].sum()
+    short_sum = raw_weights[shorts].sum()
+
+    if long_sum > 0:
+        day.loc[longs, "weight_target"] = (
+            raw_weights[longs] / long_sum
+        ) * (gross_target / 2)
+
+    if short_sum > 0:
+        day.loc[shorts, "weight_target"] = (
+            -raw_weights[shorts] / short_sum
+        ) * (gross_target / 2)
 
     # ------------------------------------------------
-    # 4) Normalize to gross_target
+    # 4) Per-asset cap
+    # ------------------------------------------------
+    day["weight_target"] = day["weight_target"].clip(
+        lower=-MAX_WEIGHT_PER_ASSET,
+        upper= MAX_WEIGHT_PER_ASSET
+    )
+
+    # ------------------------------------------------
+    # 5) Final gross normalization + hard cap
     # ------------------------------------------------
     gross = day["weight_target"].abs().sum()
     if gross > 0:
         day["weight_target"] *= (gross_target / gross)
 
-    # ------------------------------------------------
-    # 5) Per-asset hard cap
-    # ------------------------------------------------
-    day["weight_target"] = day["weight_target"].clip(
-        lower=-MAX_WEIGHT_PER_ASSET,
-        upper=MAX_WEIGHT_PER_ASSET
-    )
-
-    # ------------------------------------------------
-    # 6) FINAL gross clamp (safety)
-    # ------------------------------------------------
-    gross_now = day["weight_target"].abs().sum()
-    if gross_now > MAX_GROSS and gross_now > 0:
-        day["weight_target"] *= (MAX_GROSS / gross_now)
+    if day["weight_target"].abs().sum() > MAX_GROSS:
+        day["weight_target"] *= MAX_GROSS / day["weight_target"].abs().sum()
 
     day["weight"] = day["weight_target"]
     return day
-
 
 def _apply_turnover_cap(df: pd.DataFrame, max_turnover: float) -> pd.DataFrame:
     """
