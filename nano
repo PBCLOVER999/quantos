@@ -1,0 +1,28 @@
+from orchestrator.runtime.boot import boot
+from kernel.execution.heartbeat import heartbeat
+
+from engine.services.data_ingest import run_data_ingest
+from engine.services.factor_engine import run_factor_engine
+from engine.services.signal_engine import run_signal_engine
+from engine.services.backtest_service import run_backtest_service
+
+# visualization import FIXED:
+from visualize.plot_pnl import plot_performance
+
+
+print("[QuantOS] Booting system...")
+
+boot()
+heartbeat()
+
+print("[QuantOS] Starting system services...")
+
+run_data_ingest()
+run_factor_engine()
+run_signal_engine()
+run_backtest_service()
+
+print("[QuantOS] All services completed successfully.")
+
+# Call visualization (now correctly imported)
+plot_performance()

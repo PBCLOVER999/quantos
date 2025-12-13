@@ -1,0 +1,16 @@
+{
+  "seed_version": "1.0",
+  "description": "QuantOS Seed — deterministic quant engine foundation",
+  "modules": {
+    "kernel": ["execution", "modules", "io"],
+    "orchestrator": ["scheduler", "runtime", "interfaces"],
+    "engine": ["core", "pipelines", "agents", "models"],
+    "memory": ["long_term", "short_term", "vectors"],
+    "audit": ["drift", "checks", "meta"]
+  },
+  "drift_policy": {
+    "strict_mode": true,
+    "block_execution_on_drift": true,
+    "log_to": "logs/drift.log"
+  }
+}
