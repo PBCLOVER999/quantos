@@ -23,6 +23,7 @@ TURNOVER_CAP_PER_DAY = 0.05
 def _risk_model_for_day(day: pd.DataFrame) -> pd.DataFrame:
     """
     Regime-aware, volatility-scaled cross-sectional momentum portfolio.
+    Safe fallback if vol_20 is unavailable.
     """
 
     day = day.copy()
@@ -46,28 +47,29 @@ def _risk_model_for_day(day: pd.DataFrame) -> pd.DataFrame:
         return day
 
     # ------------------------------------------------
-    # 3) Volatility scaling
+    # 3) Volatility scaling (SAFE)
     # ------------------------------------------------
-    # Use vol_20, fallback if missing
-    vol = day["vol_20"].replace(0, np.nan)
-    inv_vol = 1.0 / vol
-    inv_vol = inv_vol.fillna(0.0)
+    if "vol_20" in day.columns:
+        vol = day["vol_20"].replace(0, np.nan)
+        inv_vol = (1.0 / vol).fillna(0.0)
+        scale = inv_vol
+    else:
+        # Fallback: equal-weight scaling
+        scale = pd.Series(1.0, index=day.index)
 
-    # Apply direction
-    raw_weights = inv_vol * sig.abs()
+    raw = scale * sig.abs()
 
-    # Normalize separately for long / short legs
-    long_sum  = raw_weights[longs].sum()
-    short_sum = raw_weights[shorts].sum()
+    long_sum  = raw[longs].sum()
+    short_sum = raw[shorts].sum()
 
     if long_sum > 0:
         day.loc[longs, "weight_target"] = (
-            raw_weights[longs] / long_sum
+            raw[longs] / long_sum
         ) * (gross_target / 2)
 
     if short_sum > 0:
         day.loc[shorts, "weight_target"] = (
-            -raw_weights[shorts] / short_sum
+            -raw[shorts] / short_sum
         ) * (gross_target / 2)
 
     # ------------------------------------------------
@@ -79,7 +81,7 @@ def _risk_model_for_day(day: pd.DataFrame) -> pd.DataFrame:
     )
 
     # ------------------------------------------------
-    # 5) Final gross normalization + hard cap
+    # 5) Normalize + hard gross cap
     # ------------------------------------------------
     gross = day["weight_target"].abs().sum()
     if gross > 0:
