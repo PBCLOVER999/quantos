@@ -3,89 +3,95 @@
 import pandas as pd
 import numpy as np
 
-# ---------------- CONFIG ----------------
+# ====================================================
+# CONFIG
+# ====================================================
 
 MAX_WEIGHT_PER_ASSET = 0.25
-TARGET_GROSS_LEV = 1.0
+
+REGIME_GROSS_ON  = 1.00   # normal exposure
+REGIME_GROSS_OFF = 0.25   # risk-off throttle (NOT zero)
+
+MAX_GROSS = 1.00          # hard portfolio gross cap
 TURNOVER_CAP_PER_DAY = 0.05
 
 
-# ---------------- CORE LOGIC ----------------
+# ====================================================
+# CORE LOGIC
+# ====================================================
 
 def _risk_model_for_day(day: pd.DataFrame) -> pd.DataFrame:
     """
-    Convert raw selection signals into volatility-scaled portfolio weights.
-    Selection-based, cash-aware, risk-scaled.
+    Regime-aware cross-sectional momentum portfolio.
+
+    - Risk-ON  → full momentum exposure
+    - Risk-OFF → throttled exposure (same alpha, smaller size)
     """
 
     day = day.copy()
-
-    # ------------------------------------------------
-    # 1) Extract raw signals
-    # ------------------------------------------------
-    sig = day["raw_signal"].astype(float)
-    longs = sig > 0
-    shorts = sig < 0
-
-    n_long = longs.sum()
-    n_short = shorts.sum()
-
     day["weight_target"] = 0.0
 
+    # ------------------------------------------------
+    # 1) Regime throttle
+    # ------------------------------------------------
+    if "regime" in day.columns and len(day) > 0:
+        reg = float(day["regime"].iloc[0])
+    else:
+        reg = 1.0
+
+    gross_target = REGIME_GROSS_ON if reg > 0 else REGIME_GROSS_OFF
+
+    # ------------------------------------------------
+    # 2) Extract signals
+    # ------------------------------------------------
+    sig = day["raw_signal"].astype(float)
+
+    longs  = sig > 0
+    shorts = sig < 0
+
+    n_long  = longs.sum()
+    n_short = shorts.sum()
+
     if n_long == 0 and n_short == 0:
+        day["weight"] = 0.0
         return day
 
     # ------------------------------------------------
-    # 2) Base equal weights (directional)
+    # 3) Equal-weight legs (scaled by gross target)
     # ------------------------------------------------
     if n_long > 0:
-        w_long = min(TARGET_GROSS_LEV / max(n_long, 1), MAX_WEIGHT_PER_ASSET)
+        w_long = min(gross_target / max(n_long, 1), MAX_WEIGHT_PER_ASSET)
         day.loc[longs, "weight_target"] = w_long
 
     if n_short > 0:
-        w_short = min(TARGET_GROSS_LEV / max(n_short, 1), MAX_WEIGHT_PER_ASSET)
-        day.loc[shorts, "weight_target"] = -w_short
+        w_short = -min(gross_target / max(n_short, 1), MAX_WEIGHT_PER_ASSET)
+        day.loc[shorts, "weight_target"] = w_short
 
     # ------------------------------------------------
-    # 3) Volatility scaling (inverse-vol)
-    # ------------------------------------------------
-    if "vol_20" in day.columns:
-        vol = day["vol_20"].replace(0, np.nan)
-
-        inv_vol = 1.0 / vol
-        inv_vol = inv_vol.replace([np.inf, -np.inf], np.nan)
-
-        # Normalize cross-sectionally (mean = 1)
-        inv_vol = inv_vol / inv_vol.mean()
-
-        day["weight_target"] *= inv_vol.fillna(0.0)
-
-    # ------------------------------------------------
-    # 4) Gross exposure normalization
+    # 4) Normalize to exact gross_target
     # ------------------------------------------------
     gross = day["weight_target"].abs().sum()
     if gross > 0:
-        day["weight_target"] = TARGET_GROSS_LEV * day["weight_target"] / gross
+        day["weight_target"] *= (gross_target / gross)
 
     # ------------------------------------------------
-    # 5) Final per-asset safety cap
+    # 5) Hard gross cap (kills leverage spikes)
     # ------------------------------------------------
-    day["weight_target"] = day["weight_target"].clip(
-        lower=-MAX_WEIGHT_PER_ASSET,
-        upper=MAX_WEIGHT_PER_ASSET
-    )
+    gross_now = day["weight_target"].abs().sum()
+    if gross_now > MAX_GROSS and gross_now > 0:
+        day["weight_target"] *= (MAX_GROSS / gross_now)
 
+    day["weight"] = day["weight_target"]
     return day
 
 
 def _apply_turnover_cap(df: pd.DataFrame, max_turnover: float) -> pd.DataFrame:
     """
-    Limit per-asset daily turnover AFTER weights are finalized.
+    Limit per-asset daily turnover AFTER portfolio construction.
     """
 
     df = df.sort_values(["date", "ticker"]).copy()
     prev_w = {}
-
     out = []
 
     for date, day in df.groupby("date"):
@@ -94,7 +100,7 @@ def _apply_turnover_cap(df: pd.DataFrame, max_turnover: float) -> pd.DataFrame:
 
         for _, row in day.iterrows():
             t = row["ticker"]
-            target = row["weight_target"]
+            target = row["weight"]
             prev = prev_w.get(t, 0.0)
 
             delta = target - prev
@@ -114,7 +120,7 @@ def _apply_turnover_cap(df: pd.DataFrame, max_turnover: float) -> pd.DataFrame:
 
 def build_risk_managed_mom_portfolio(df_signals: pd.DataFrame) -> pd.DataFrame:
     """
-    Final portfolio construction.
+    Final portfolio construction pipeline.
     """
 
     print("[PortfolioEngine] Building RISK-MANAGED cross-sectional momentum portfolio...")
@@ -137,3 +143,4 @@ def build_risk_managed_mom_portfolio(df_signals: pd.DataFrame) -> pd.DataFrame:
     df.to_csv("results/debug_portfolio.csv", index=False)
 
     return port
+
