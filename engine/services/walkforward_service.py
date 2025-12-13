@@ -1,13 +1,7 @@
 # engine/services/walkforward_service.py
 
-from __future__ import annotations
-
 import pandas as pd
-from engine.services.performance_service import compute_performance
-
-
-def _as_dt(s: pd.Series) -> pd.Series:
-    return pd.to_datetime(s, errors="coerce")
+import numpy as np
 
 
 def run_walkforward(
@@ -15,82 +9,92 @@ def run_walkforward(
     start_date: str = "2005-01-01",
     train_years: int = 5,
     test_years: int = 1,
-    out_csv: str = "results/walkforward_summary.csv",
+    out_csv: str = "results/walkforward_results.csv",
 ) -> pd.DataFrame:
     """
-    Walk-forward evaluation on already-generated backtest results.
+    Walk-forward evaluation using realized DAILY RETURNS.
 
-    Assumes df_results has at least:
+    Expects df_results columns:
       - date
-      - strategy_ret
+      - daily_ret
 
-    We create rolling windows:
-      Train: [t, t+train_years)
-      Test : [t+train_years, t+train_years+test_years)
-    and compute performance on each TEST window.
+    Produces OOS metrics per window.
     """
 
-    if "date" not in df_results.columns:
-        raise ValueError("[WalkForward] df_results missing 'date' column")
-    if "strategy_ret" not in df_results.columns:
-        raise ValueError("[WalkForward] df_results missing 'strategy_ret' column")
+    # -----------------------------
+    # 0) Validation
+    # -----------------------------
+    required = {"date", "daily_ret"}
+    missing = required - set(df_results.columns)
+    if missing:
+        raise ValueError(f"[WalkForward] Missing required columns: {missing}")
 
     df = df_results.copy()
-    df["date"] = _as_dt(df["date"])
-    df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").reset_index(drop=True)
 
     start = pd.to_datetime(start_date)
-    last = df["date"].max()
+    end = df["date"].max()
 
     rows = []
     t0 = start
 
+    # -----------------------------
+    # 1) Rolling windows
+    # -----------------------------
     while True:
         train_end = t0 + pd.DateOffset(years=train_years)
         test_end = train_end + pd.DateOffset(years=test_years)
 
-        if train_end >= last:
+        if test_end > end:
             break
 
-        test_slice = df[(df["date"] >= train_end) & (df["date"] < test_end)].copy()
+        test_slice = df[
+            (df["date"] >= train_end) &
+            (df["date"] < test_end)
+        ].copy()
+
         if len(test_slice) < 50:
-            # too small to be meaningful
-            t0 = t0 + pd.DateOffset(years=test_years)
-            if t0 >= last:
-                break
+            t0 += pd.DateOffset(years=1)
             continue
 
-        perf = compute_performance(test_slice)
+        # -----------------------------
+        # 2) OOS metrics
+        # -----------------------------
+        mean_ret = test_slice["daily_ret"].mean()
+        vol = test_slice["daily_ret"].std()
 
-        # compute_performance might return dict or DataFrame depending on your implementation
-        if isinstance(perf, dict):
-            row = perf
-        elif isinstance(perf, pd.DataFrame):
-            # If it's a one-row DF, convert to dict
-            if len(perf) == 1:
-                row = perf.iloc[0].to_dict()
-            else:
-                row = {"note": "performance_service returned multi-row dataframe"}
-        else:
-            row = {"note": f"unexpected perf type: {type(perf)}"}
-
-        row.update(
-            {
-                "train_start": t0.date().isoformat(),
-                "train_end": train_end.date().isoformat(),
-                "test_start": train_end.date().isoformat(),
-                "test_end": test_end.date().isoformat(),
-                "n_days_test": int(len(test_slice)),
-            }
+        sharpe = (
+            mean_ret / vol * np.sqrt(252)
+            if vol > 0 else 0.0
         )
-        rows.append(row)
 
-        # roll forward by test window
-        t0 = t0 + pd.DateOffset(years=test_years)
-        if t0 >= last:
-            break
+        cumret = (1.0 + test_slice["daily_ret"]).prod()
+        max_dd = (
+            (1.0 + test_slice["daily_ret"])
+            .cumprod()
+            .div((1.0 + test_slice["daily_ret"]).cumprod().cummax())
+            .sub(1.0)
+            .min()
+        )
+
+        rows.append({
+            "train_start": t0.date().isoformat(),
+            "train_end": train_end.date().isoformat(),
+            "test_start": train_end.date().isoformat(),
+            "test_end": test_end.date().isoformat(),
+            "n_test_days": int(len(test_slice)),
+            "oos_cumret": float(cumret),
+            "oos_sharpe": float(sharpe),
+            "oos_max_drawdown": float(max_dd),
+        })
+
+        # roll forward one year
+        t0 += pd.DateOffset(years=1)
 
     out = pd.DataFrame(rows)
     out.to_csv(out_csv, index=False)
-    print(f"[WalkForward] Summary saved to {out_csv} (windows={len(out)})")
+
+    print(f"[WalkForward] Results saved to {out_csv} (windows={len(out)})")
     return out
+
