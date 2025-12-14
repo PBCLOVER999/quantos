@@ -17,7 +17,8 @@ REGIME_GROSS_OFF = 0.25   # throttled risk-off exposure
 MAX_GROSS = 1.00          # absolute portfolio gross cap
 TURNOVER_CAP_PER_DAY = 0.05
 
-MIN_ACTIVE_ASSETS = 4     # >>> CRITICAL OOS STABILITY <<<
+MIN_ACTIVE_ASSETS = 4     # minimum cross-section breadth
+MIN_HOLD_DAYS = 5         # <<< FIX: REQUIRED BY HOLD LOGIC <<<
 
 
 # ====================================================
@@ -54,7 +55,7 @@ def _risk_model_for_day(day: pd.DataFrame) -> pd.DataFrame:
     shorts = sig < 0
     n_active = int(longs.sum() + shorts.sum())
 
-    # >>> HARD GATE: avoid thin / unstable cross-sections
+    # HARD GATE: avoid thin cross-sections
     if n_active < MIN_ACTIVE_ASSETS:
         day["weight"] = 0.0
         return day
@@ -100,7 +101,7 @@ def _risk_model_for_day(day: pd.DataFrame) -> pd.DataFrame:
         day["weight_target"] *= gross_target / gross
 
     # ------------------------------------------------
-    # 6) Hard gross cap (FINAL SAFETY)
+    # 6) Hard gross cap
     # ------------------------------------------------
     gross_now = day["weight_target"].abs().sum()
     if gross_now > MAX_GROSS and gross_now > 0:
@@ -137,12 +138,11 @@ def _apply_turnover_cap(df: pd.DataFrame, max_turnover: float) -> pd.DataFrame:
             hd = hold_days.get(t, 0)
 
             # -------------------------------
-            # MIN HOLDING PERIOD ENFORCEMENT
+            # MIN HOLDING PERIOD
             # -------------------------------
             if prev != 0.0 and hd < MIN_HOLD_DAYS:
                 adj = prev
                 hold_days[t] = hd + 1
-
             else:
                 delta = target - prev
                 if abs(delta) > max_turnover:
@@ -150,7 +150,6 @@ def _apply_turnover_cap(df: pd.DataFrame, max_turnover: float) -> pd.DataFrame:
                 else:
                     adj = target
 
-                # Reset hold counter if position opened/changed
                 if prev == 0.0 and adj != 0.0:
                     hold_days[t] = 1
                 elif adj == 0.0:
@@ -161,9 +160,7 @@ def _apply_turnover_cap(df: pd.DataFrame, max_turnover: float) -> pd.DataFrame:
             prev_w[t] = adj
             weights.append(adj)
 
-        # -------------------------------
         # FINAL GROSS CAP
-        # -------------------------------
         gross = sum(abs(w) for w in weights)
         if gross > MAX_GROSS and gross > 0:
             weights = [w / gross * MAX_GROSS for w in weights]
@@ -202,3 +199,4 @@ def build_risk_managed_mom_portfolio(df_signals: pd.DataFrame) -> pd.DataFrame:
 
     df.to_csv("results/debug_portfolio.csv", index=False)
     return port
+
