@@ -112,12 +112,17 @@ def _risk_model_for_day(day: pd.DataFrame) -> pd.DataFrame:
 
 def _apply_turnover_cap(df: pd.DataFrame, max_turnover: float) -> pd.DataFrame:
     """
-    Per-asset turnover cap.
-    Enforces FINAL portfolio-level gross constraint.
+    Enforces:
+    - per-asset turnover cap
+    - minimum holding period
+    - final gross cap
     """
 
     df = df.sort_values(["date", "ticker"]).copy()
-    prev_w: dict[str, float] = {}
+
+    prev_w = {}
+    hold_days = {}
+
     out = []
 
     for date, day in df.groupby("date"):
@@ -127,18 +132,38 @@ def _apply_turnover_cap(df: pd.DataFrame, max_turnover: float) -> pd.DataFrame:
         for _, row in day.iterrows():
             t = row["ticker"]
             target = row["weight"]
-            prev = prev_w.get(t, 0.0)
 
-            delta = target - prev
-            if abs(delta) > max_turnover:
-                adj = prev + np.sign(delta) * max_turnover
+            prev = prev_w.get(t, 0.0)
+            hd = hold_days.get(t, 0)
+
+            # -------------------------------
+            # MIN HOLDING PERIOD ENFORCEMENT
+            # -------------------------------
+            if prev != 0.0 and hd < MIN_HOLD_DAYS:
+                adj = prev
+                hold_days[t] = hd + 1
+
             else:
-                adj = target
+                delta = target - prev
+                if abs(delta) > max_turnover:
+                    adj = prev + np.sign(delta) * max_turnover
+                else:
+                    adj = target
+
+                # Reset hold counter if position opened/changed
+                if prev == 0.0 and adj != 0.0:
+                    hold_days[t] = 1
+                elif adj == 0.0:
+                    hold_days[t] = 0
+                else:
+                    hold_days[t] = hold_days.get(t, 0) + 1
 
             prev_w[t] = adj
             weights.append(adj)
 
-        # ---------- FINAL GROSS CLIP ----------
+        # -------------------------------
+        # FINAL GROSS CAP
+        # -------------------------------
         gross = sum(abs(w) for w in weights)
         if gross > MAX_GROSS and gross > 0:
             weights = [w / gross * MAX_GROSS for w in weights]
