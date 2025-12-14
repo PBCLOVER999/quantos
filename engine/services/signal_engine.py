@@ -18,7 +18,7 @@ REGIME_EMA_COL = "ema_200"
 # SIGNAL SMOOTHING  (OPTION C)
 # ====================================================
 
-SIGNAL_EMA_HALFLIFE = 5      # persistence
+SIGNAL_EMA_HALFLIFE = 3      # persistence
 SIGNAL_DEADZONE = 0.05       # suppress micro churn
 
 # ====================================================
