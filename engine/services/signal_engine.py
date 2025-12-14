@@ -1,7 +1,9 @@
 # engine/services/signal_engine.py
 
-import numpy as np
+from __future__ import annotations
+
 import pandas as pd
+import numpy as np
 
 from signals.alpha.basic_signals import compute_cross_sectional_momentum
 
@@ -11,7 +13,13 @@ from signals.alpha.basic_signals import compute_cross_sectional_momentum
 
 REGIME_TICKER = "SPY"
 REGIME_EMA_COL = "ema_200"
-REGIME_CONFIRM_DAYS = 10   # persistence filter
+
+# ====================================================
+# SIGNAL SMOOTHING CONFIG  <<< OPTION C >>>
+# ====================================================
+
+SIGNAL_EMA_HALFLIFE = 5        # persistence
+SIGNAL_DEADZONE = 0.05         # avoid micro churn
 
 
 # ====================================================
@@ -21,8 +29,9 @@ REGIME_CONFIRM_DAYS = 10   # persistence filter
 def run_signal_engine(df_factors: pd.DataFrame) -> pd.DataFrame:
     """
     Signal Engine
-    - Alpha: Cross-sectional momentum (pure)
-    - Regime: SPY EMA-200 with persistence filter
+    - Alpha: Cross-sectional momentum
+    - Regime: SPY EMA-200
+    - Signal smoothing for persistence
     """
 
     print("[QuantOS][SignalEngine] Computing cross-sectional momentum signals...")
@@ -33,58 +42,52 @@ def run_signal_engine(df_factors: pd.DataFrame) -> pd.DataFrame:
     df = compute_cross_sectional_momentum(df_factors)
 
     # ------------------------------------------------
-    # 2) SAFE default regime (ALWAYS EXISTS)
+    # 2) Regime (default risk-on)
     # ------------------------------------------------
-    df["regime"] = 0.0
+    df["regime"] = 1.0
 
-    # ------------------------------------------------
-    # 3) SPY trend regime
-    # ------------------------------------------------
-    if REGIME_TICKER not in df["ticker"].unique():
-        print("[SignalEngine] WARNING: SPY not found — forcing risk-on.")
-        df["regime"] = 1.0
-
-    else:
+    if REGIME_TICKER in df["ticker"].unique():
         spy = (
             df[df["ticker"] == REGIME_TICKER]
             .loc[:, ["date", "price", REGIME_EMA_COL]]
             .dropna()
             .rename(columns={
                 "price": "spy_price",
-                REGIME_EMA_COL: "spy_ema"
+                REGIME_EMA_COL: "spy_ema_200"
             })
-            .sort_values("date")
         )
 
-        if spy.empty:
-            print("[SignalEngine] WARNING: SPY EMA unavailable — forcing risk-on.")
-            df["regime"] = 1.0
-
-        else:
-            spy["raw_regime"] = (spy["spy_price"] > spy["spy_ema"]).astype(int)
-
-            # Persistence filter
-            spy["spy_regime"] = (
-                spy["raw_regime"]
-                .rolling(REGIME_CONFIRM_DAYS)
-                .mean()
-                .ge(1.0)
-                .astype(int)
-            )
-
-            # Merge TEMP column
+        if not spy.empty:
+            spy["regime_spy"] = (spy["spy_price"] > spy["spy_ema_200"]).astype(float)
             df = df.merge(
-                spy[["date", "spy_regime"]],
+                spy[["date", "regime_spy"]],
                 on="date",
                 how="left"
             )
-
-            # 🔒 HARD ASSIGN (NO KeyError POSSIBLE)
-            df["regime"] = df["spy_regime"].fillna(0.0)
-            df.drop(columns=["spy_regime"], inplace=True)
+            df["regime"] = df["regime_spy"].fillna(df["regime"])
+            df.drop(columns=["regime_spy"], inplace=True)
 
     # ------------------------------------------------
-    # 4) Gate alpha
+    # 3) SIGNAL SMOOTHING (CRITICAL FIX)
+    # ------------------------------------------------
+    df = df.sort_values(["ticker", "date"])
+
+    df["raw_signal"] = (
+        df.groupby("ticker")["raw_signal"]
+          .apply(
+              lambda s: s.ewm(
+                  halflife=SIGNAL_EMA_HALFLIFE,
+                  adjust=False
+              ).mean()
+          )
+          .reset_index(level=0, drop=True)
+    )
+
+    # Deadzone
+    df.loc[df["raw_signal"].abs() < SIGNAL_DEADZONE, "raw_signal"] = 0.0
+
+    # ------------------------------------------------
+    # 4) Regime gating (AFTER smoothing)
     # ------------------------------------------------
     df["raw_signal"] = df["raw_signal"] * df["regime"]
 
@@ -102,9 +105,9 @@ def run_signal_engine(df_factors: pd.DataFrame) -> pd.DataFrame:
     ]
     cols = [c for c in cols if c in df.columns]
 
-    df_out = df[cols].copy()
+    out = df[cols].copy()
 
     print("[QuantOS][SignalEngine] Signal snapshot:")
-    print(df_out.head())
+    print(out.head())
 
-    return df_out
+    return out
