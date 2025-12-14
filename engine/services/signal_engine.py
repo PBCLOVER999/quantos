@@ -11,9 +11,7 @@ from signals.alpha.basic_signals import compute_cross_sectional_momentum
 
 REGIME_TICKER = "SPY"
 REGIME_EMA_COL = "ema_200"
-
-# 🔒 Regime persistence (ANTI-WHIPSAW)
-REGIME_CONFIRM_DAYS = 10   # <<< THIS IS THE KEY CHANGE
+REGIME_CONFIRM_DAYS = 10   # persistence filter
 
 
 # ====================================================
@@ -30,21 +28,22 @@ def run_signal_engine(df_factors: pd.DataFrame) -> pd.DataFrame:
     print("[QuantOS][SignalEngine] Computing cross-sectional momentum signals...")
 
     # ------------------------------------------------
-    # 1) Alpha (PURE)
+    # 1) Alpha
     # ------------------------------------------------
     df = compute_cross_sectional_momentum(df_factors)
 
     # ------------------------------------------------
-    # 2) Default regime = OFF (safe)
+    # 2) SAFE default regime (ALWAYS EXISTS)
     # ------------------------------------------------
     df["regime"] = 0.0
 
     # ------------------------------------------------
-    # 3) SPY EMA-200 regime detection
+    # 3) SPY trend regime
     # ------------------------------------------------
     if REGIME_TICKER not in df["ticker"].unique():
         print("[SignalEngine] WARNING: SPY not found — forcing risk-on.")
         df["regime"] = 1.0
+
     else:
         spy = (
             df[df["ticker"] == REGIME_TICKER]
@@ -60,12 +59,12 @@ def run_signal_engine(df_factors: pd.DataFrame) -> pd.DataFrame:
         if spy.empty:
             print("[SignalEngine] WARNING: SPY EMA unavailable — forcing risk-on.")
             df["regime"] = 1.0
+
         else:
-            # Raw regime
             spy["raw_regime"] = (spy["spy_price"] > spy["spy_ema"]).astype(int)
 
-            # 🔒 Persistence filter
-            spy["regime"] = (
+            # Persistence filter
+            spy["spy_regime"] = (
                 spy["raw_regime"]
                 .rolling(REGIME_CONFIRM_DAYS)
                 .mean()
@@ -73,21 +72,24 @@ def run_signal_engine(df_factors: pd.DataFrame) -> pd.DataFrame:
                 .astype(int)
             )
 
+            # Merge TEMP column
             df = df.merge(
-                spy[["date", "regime"]],
+                spy[["date", "spy_regime"]],
                 on="date",
                 how="left"
             )
 
-            df["regime"] = df["regime"].fillna(0.0)
+            # 🔒 HARD ASSIGN (NO KeyError POSSIBLE)
+            df["regime"] = df["spy_regime"].fillna(0.0)
+            df.drop(columns=["spy_regime"], inplace=True)
 
     # ------------------------------------------------
-    # 4) Gate alpha by regime
+    # 4) Gate alpha
     # ------------------------------------------------
     df["raw_signal"] = df["raw_signal"] * df["regime"]
 
     # ------------------------------------------------
-    # 5) Final output
+    # 5) Output
     # ------------------------------------------------
     cols = [
         "date",
